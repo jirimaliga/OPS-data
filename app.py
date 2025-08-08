@@ -1,70 +1,56 @@
-import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-from io import BytesIO
 
-st.title("Souhrnná analýza práce - Prodej & Vydat + Prázdné")
+# Načtení Excel souboru
+df = pd.read_excel("Řádky práce_638901695226656392.xlsx", engine="openpyxl")
 
-uploaded_file = st.file_uploader("Nahraj Excel soubor (.xlsx)", type=["xlsx"])
+# Filtrování: Typ práce == 'Vydat' a ID pracovní třídy == 'Prodej' nebo prázdné
+filtered_df = df[(df['Typ práce'] == 'Vydat') & ((df['ID pracovní třídy'] == 'Prodej') | (df['ID pracovní třídy'].isna()))].copy()
 
-if uploaded_file:
-    df = pd.read_excel(uploaded_file, engine="openpyxl")
-    df["Uzavřená práce"] = pd.to_datetime(df["Uzavřená práce"], errors="coerce")
+# Převod datumu
+filtered_df['Datum'] = pd.to_datetime(filtered_df['Uzavřená práce']).dt.date
 
-    # Filtrování: Typ práce = Vydat, ID pracovní třídy = Prodej nebo prázdné
-    filtered_df = df[
-        (df["Typ práce"] == "Vydat") &
-        (df["ID pracovní třídy"].isin(["Prodej", None, ""]))
-    ]
+# Výpočet metrik
+filtered_df['SKP'] = filtered_df.apply(lambda row: 1 if pd.isna(row['ID pracovní třídy']) else row['Množství práce'], axis=1)
+filtered_df['PALETY'] = filtered_df.apply(lambda row: row['Množství práce'] if row['Jednotka'] == 'PAL' else 0, axis=1)
 
-    # Výpočet POČET SKU, SKP, PALET
-    def compute_summary(group):
-        pocet_sku = len(group)
-        skp_values = group.apply(
-            lambda row: 1 if pd.isna(row["ID pracovní třídy"]) or row["ID pracovní třídy"] == "" else row["Množství práce"],
-            axis=1
-        )
-        pocet_skp = skp_values.sum()
-        pocet_palet = group[group["Jednotka"] == "PAL"]["Množství práce"].sum()
-        return pd.Series({
-            "POČET SKU": pocet_sku,
-            "POČET SKP": pocet_skp,
-            "POČET PALET": pocet_palet
-        })
+# Souhrn podle uživatele a dne
+grouped = filtered_df.groupby(['Datum', 'ID uživatele']).agg(
+    POČET_SKU=('Množství práce', 'count'),
+    POČET_SKP=('SKP', 'sum'),
+    POČET_PALET=('PALETY', 'sum')
+).reset_index()
 
-    # Souhrn podle dne a ID uživatele
-    summary = filtered_df.groupby([filtered_df["Uzavřená práce"].dt.date, "ID uživatele"]).apply(compute_summary).reset_index()
+# Celkové součty za den
+daily_totals = grouped.groupby('Datum').agg(
+    CELKEM_POČET_SKU=('POČET_SKU', 'sum'),
+    CELKEM_POČET_SKP=('POČET_SKP', 'sum'),
+    CELKEM_POČET_PALET=('POČET_PALET', 'sum')
+).reset_index()
 
-    # Souhrn CELKEM za každý den
-    daily_total = filtered_df.groupby(filtered_df["Uzavřená práce"].dt.date).apply(compute_summary).reset_index()
-    daily_total["ID uživatele"] = "CELKEM"
+# Spojení souhrnů
+final_df = pd.merge(grouped, daily_totals, on='Datum', how='left')
 
-    # Spojení obou tabulek
-    final_summary = pd.concat([summary, daily_total], ignore_index=True)
+# Export do Excelu
+final_df.to_excel("souhrn_vydat.xlsx", index=False)
 
-    st.subheader("Souhrnná tabulka")
-    st.dataframe(final_summary)
+# Graf 1: Počet SKU podle uživatelů v rámci dne
+pivot1 = grouped.pivot(index='Datum', columns='ID uživatele', values='POČET_SKU').fillna(0)
+pivot1.plot(kind='bar', stacked=True, figsize=(12, 6))
+plt.title("Počet SKU podle uživatelů v rámci dne")
+plt.xlabel("Datum")
+plt.ylabel("Počet SKU")
+plt.tight_layout()
+plt.savefig("graf_sku_podle_uzivatelu.png")
+plt.close()
 
-    # Export do Excelu
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine='openpyxl') as writer:
-        final_summary.to_excel(writer, index=False, sheet_name='Souhrn')
-    st.download_button(
-        label="📥 Stáhnout souhrn jako Excel",
-        data=output.getvalue(),
-        file_name="souhrn_prodej_vydat.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+# Graf 2: Celkové počty po dnech
+daily_totals.set_index('Datum').plot(kind='bar', figsize=(12, 6))
+plt.title("Celkové počty po dnech")
+plt.xlabel("Datum")
+plt.ylabel("Počty")
+plt.tight_layout()
+plt.savefig("graf_celkove_po_dnech.png")
+plt.close()
 
-    # Grafy po dnech (jen CELKEM)
-    st.subheader("📊 Grafy souhrnných hodnot po dnech")
-
-    daily_plot_data = daily_total.set_index("Uzavřená práce")[["POČET SKU", "POČET SKP", "POČET PALET"]]
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    daily_plot_data.plot(kind='bar', ax=ax)
-    plt.xticks(rotation=45)
-    plt.xlabel("Datum")
-    plt.ylabel("Hodnota")
-    plt.title("Souhrnné hodnoty po dnech (CELKEM)")
-    st.pyplot(fig)
+print("Souhrn byl úspěšně vygenerován do souboru 'souhrn_vydat.xlsx' a grafy byly uloženy jako PNG.")
